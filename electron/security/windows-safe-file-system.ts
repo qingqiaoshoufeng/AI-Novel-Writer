@@ -287,6 +287,13 @@ function electronAppIsPackaged(): boolean {
   // Vitest/Node do not expose Electron's main-process `app` export. The
   // production Electron namespace does, and app.isPackaged is authoritative.
   try {
+    // IDEs that embed Electron (e.g. Trae) inject ELECTRON_FORCE_IS_PACKAGED
+    // into child terminals, so app.isPackaged reports true even when running
+    // the stock node_modules electron binary in development. The executable
+    // name is the authoritative development signal; a real package still
+    // resolves its bundled helper from resources before this flag matters.
+    const baseName = path.basename(process.execPath).toLowerCase()
+    if (baseName === 'electron' || baseName === 'electron.exe') return false
     return electron.app.isPackaged === true
   } catch {
     return false

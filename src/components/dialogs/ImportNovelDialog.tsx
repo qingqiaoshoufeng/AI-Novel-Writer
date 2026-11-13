@@ -29,6 +29,15 @@ import { Check } from '../ui/Check'
 import { useLocaleStore } from '../../stores/locale-store'
 import { displayedErrorMessage, englishWithReason } from '../../i18n/app-errors'
 import { captureProjectSession, isProjectSessionCurrent } from '../project-session-gate'
+import {
+  extractAuthorDirection,
+  getPromptSource,
+  resolvePromptTemplate,
+  saveProjectCustomPrompt,
+  withAuthorDirection,
+  type PromptTemplate,
+} from '../../services/prompt-templates'
+import { resolveWritingLanguage } from '../../shared/writing-language'
 import { randomUUID } from '../../utils/id'
 import { pluralEn } from '../../shared/plural-en'
 
@@ -79,6 +88,10 @@ export default function ImportNovelDialog({ open, onClose }: ImportNovelDialogPr
     runs: ImportRunSnapshot[]
   } | null>(null)
   const [selectedResumableRunId, setSelectedResumableRunId] = useState('')
+  // 创作方向：回显原创仿写模板的【作者创作方向】，导入确认时写回项目级模板
+  const [directionTemplate, setDirectionTemplate] = useState<PromptTemplate | null>(null)
+  const [directionSource, setDirectionSource] = useState<'builtin' | 'global' | 'project' | null>(null)
+  const [authorDirection, setAuthorDirection] = useState('')
   const resumableRuns = resumableState && currentProject?.sessionLease === resumableState.projectLeaseId
     ? resumableState.runs.filter(run => run.purpose === purpose)
     : []
@@ -118,6 +131,43 @@ export default function ImportNovelDialog({ open, onClose }: ImportNovelDialogPr
       })
     return () => { active = false }
   }, [open, currentProject])
+
+  // 打开对话框并选择「参考小说」时，回显当前生效模板里的创作方向；没有原创仿写模板则不显示该栏。
+  // 书房入口可能尚未打开作品：此时按全局模板回显，确认导入时写入当时的目标项目。
+  useEffect(() => {
+    if (!open || purpose !== 'reference') {
+      setDirectionTemplate(null)
+      setDirectionSource(null)
+      return
+    }
+    const session = currentProject ? captureProjectSession(currentProject) : null
+    if (currentProject && !session) return
+    let active = true
+    const writingLanguage = currentProject
+      ? resolveWritingLanguage(currentProject.novelConfig.writingLanguage)
+      : resolveWritingLanguage(locale)
+    void resolvePromptTemplate('infer_novel_config_with_vectors', session ?? undefined, writingLanguage)
+      .then((template) => {
+        if (!active) return
+        if (session && !isProjectSessionCurrent(session)) return
+        const source = getPromptSource('infer_novel_config_with_vectors', session ?? undefined, writingLanguage)
+        if (!template || source === 'builtin') {
+          setDirectionTemplate(null)
+          setDirectionSource(null)
+          return
+        }
+        setDirectionTemplate(template)
+        setDirectionSource(source)
+        setAuthorDirection(extractAuthorDirection(template.content) ?? '自动')
+      })
+      .catch(() => {
+        if (active && (!session || isProjectSessionCurrent(session))) {
+          setDirectionTemplate(null)
+          setDirectionSource(null)
+        }
+      })
+    return () => { active = false }
+  }, [open, purpose, currentProject, locale])
 
   useEffect(() => {
     if (purpose !== 'author-manuscript' || !inspection || targetMode !== 'current' || !currentProject) {
@@ -366,6 +416,17 @@ export default function ImportNovelDialog({ open, onClose }: ImportNovelDialogPr
         const preparation = selectionPreparation!
         setSelectionPreparation(null)
         setSelectionProjectLeaseId('')
+        // 作者在弹窗里改过创作方向时，先写回项目级模板再启动导入；主进程在每次生成开始时从磁盘读取
+        if (directionTemplate) {
+          const next = withAuthorDirection(directionTemplate, authorDirection)
+          if (next.content !== directionTemplate.content) {
+            const saved = await saveProjectCustomPrompt(projectSession, next)
+            if (!saved) throw new Error(text(
+              '创作方向写入失败，已取消本次导入。',
+              'Failed to save the creative direction, so the import was cancelled.',
+            ))
+          }
+        }
         await applyPreparation(preparation, projectSession)
         return
       }
@@ -440,7 +501,7 @@ export default function ImportNovelDialog({ open, onClose }: ImportNovelDialogPr
       setImporting(false)
     }
   }, [
-    applyPreparation, authorInference, authorPreview, currentProject, inspection, launchRun, locale, purpose,
+    applyPreparation, authorDirection, authorInference, authorPreview, currentProject, directionTemplate, inspection, launchRun, locale, purpose,
     selectionPreparation, selectionProjectLeaseId, text,
   ])
 
@@ -600,6 +661,41 @@ export default function ImportNovelDialog({ open, onClose }: ImportNovelDialogPr
                     </span>
                   )}
                 />
+              </div>
+            )}
+            {purpose === 'reference' && directionTemplate && (
+              <div className="mt-3" data-testid="import-author-direction">
+                <Label>
+                  {text('创作方向（可选）', 'Creative direction (optional)')}
+                  <span className="ml-2 text-[0.65rem] font-normal" style={{ color: 'var(--color-text-muted)' }}>
+                    {directionSource === 'project'
+                      ? text('项目模板', 'Project template')
+                      : text('全局模板', 'Global template')}
+                  </span>
+                </Label>
+                <textarea
+                  value={authorDirection}
+                  onChange={(event) => setAuthorDirection(event.target.value)}
+                  rows={3}
+                  className="mt-1.5 w-full rounded-lg px-3 py-2 text-xs resize-y outline-none"
+                  style={{
+                    backgroundColor: 'var(--color-editor-bg)',
+                    color: 'var(--color-text)',
+                    border: '1px solid var(--color-border)',
+                    lineHeight: 1.6,
+                  }}
+                  placeholder={text(
+                    '题材类型、世界观母题、金手指类型、主角处境；留空或“自动”则随机原创。',
+                    'Genre, world motif, advantage type, protagonist situation. Leave empty or "auto" for random originality.',
+                  )}
+                  spellCheck={false}
+                />
+                <div className="mt-1 text-[0.68rem]" style={{ color: 'var(--color-text-secondary)' }}>
+                  {text(
+                    '优先于随机多样性，作用于设定与大纲；蓝图与文风随后跟随。留空或“自动”则每次导入自由原创。',
+                    'Takes precedence over random diversity and shapes settings and outline; blueprints and style follow. Empty or "auto" means free originality each import.',
+                  )}
+                </div>
               </div>
             )}
           </div>

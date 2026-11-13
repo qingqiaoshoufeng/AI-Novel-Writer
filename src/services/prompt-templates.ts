@@ -104,4 +104,33 @@ export async function deleteProjectCustomPrompt(
   return promptCatalog.commit({ action: 'delete', scope: 'project', projectSession, key, writingLanguage })
 }
 
+/** 原创仿写模板【作者创作方向】段的标记行；模板由提示词设置安装，正文自带该段。 */
+const AUTHOR_DIRECTION_HEADER = '【作者创作方向（最高优先级）】'
+const AUTHOR_DIRECTION_VALUE_PREFIX = '当前填写：'
+
+/** 从模板正文提取【作者创作方向】当前值；模板不含该段时返回 null。 */
+export function extractAuthorDirection(content: string): string | null {
+  const headerIndex = content.indexOf(AUTHOR_DIRECTION_HEADER)
+  if (headerIndex < 0) return null
+  const lineIndex = content.indexOf(AUTHOR_DIRECTION_VALUE_PREFIX, headerIndex)
+  if (lineIndex < 0 || lineIndex - headerIndex > 200) return null
+  const start = lineIndex + AUTHOR_DIRECTION_VALUE_PREFIX.length
+  const end = content.indexOf('\n', start)
+  const value = content.slice(start, end < 0 ? undefined : end).trim()
+  return value.length > 0 ? value : '自动'
+}
+
+/** 把创作方向写回模板正文；方向跨行时折叠为分号分隔，空值回退为“自动”。 */
+export function withAuthorDirection(template: PromptTemplate, direction: string): PromptTemplate {
+  const headerIndex = template.content.indexOf(AUTHOR_DIRECTION_HEADER)
+  if (headerIndex < 0) return template
+  const lineIndex = template.content.indexOf(AUTHOR_DIRECTION_VALUE_PREFIX, headerIndex)
+  if (lineIndex < 0) return template
+  const start = lineIndex + AUTHOR_DIRECTION_VALUE_PREFIX.length
+  const end = template.content.indexOf('\n', start)
+  const normalized = direction.replace(/\s*\n+\s*/g, '；').trim()
+  const content = `${template.content.slice(0, start)}${normalized || '自动'}${end < 0 ? '' : template.content.slice(end)}`
+  return { ...template, content }
+}
+
 export { appendRequiredPromptContext, renderPromptTaskGuidance, renderPrompt } from '../shared/render-prompt'

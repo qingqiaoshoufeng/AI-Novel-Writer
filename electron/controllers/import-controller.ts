@@ -1,6 +1,8 @@
 import { app, ipcMain } from 'electron'
 import { showOpenDialogInLastDirectory } from '../utils/remembered-dialog'
 import path from 'node:path'
+import os from 'node:os'
+import { appendFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { realpathSync, statSync } from 'node:fs'
 import {
@@ -88,6 +90,19 @@ function text(zhCNText: string, enUSText: string): string {
   return mainText(app.getLocale(), zhCNText, enUSText)
 }
 
+/** 把未登记的导入失败原文（含堆栈）追加到临时目录的诊断日志，便于定位被兜底文案掩盖的根因。 */
+function logImportDiagnostic(error: unknown): void {
+  try {
+    const detail = error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error)
+    appendFileSync(
+      path.join(os.tmpdir(), 'ai-novel-import-debug.log'),
+      `[${new Date().toISOString()}] ${detail}\n\n`,
+    )
+  } catch {
+    // 诊断日志写失败不影响导入主流程。
+  }
+}
+
 function importText(locale: ImportRunLocale | undefined, zhCNText: string, enUSText: string): string {
   return locale === 'en-US' ? enUSText : locale === 'zh-CN' ? zhCNText : text(zhCNText, enUSText)
 }
@@ -143,10 +158,12 @@ function importSelectionErrorMessage(
   // 导入运行与检查里作者能照做的码（#474 B1），例如文件检查过期、待确认的导入太多、补选的文件不一致。
   const known = knownAppErrorMessage(importRunLocale(undefined, locale), code)
   if (known) return known
+  logImportDiagnostic(error)
+  const detail = code && /^[A-Z][A-Z0-9_]*$/u.test(code) ? `（错误码：${code}）` : ''
   return importText(
     locale,
-    '无法读取所选文件；请重新选择后再试。',
-    'Could not read the selected files. Please choose them again.',
+    `无法读取所选文件；请重新选择后再试。${detail}`,
+    `Could not read the selected files. Please choose them again.${detail ? ` (code: ${code})` : ''}`,
   )
 }
 
